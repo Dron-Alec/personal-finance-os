@@ -571,11 +571,13 @@ def render_spending(person_key):
 
 STANDARD_BACKFILL_ACCOUNTS = [
     ("Citi Checking",      "Checking"),
+    ("Axos Checking",      "Checking"),
     ("Axos Savings",       "Savings"),
     ("Coinbase",           "Crypto"),
-    ("Fidelity 401k",      "401k"),
+    ("Roth 401k",          "401k"),
     ("Roth IRA",           "Roth IRA"),
     ("Taxable Brokerage",  "Brokerage / Stocks"),
+    ("Other Investments",  "Other"),
 ]
 
 

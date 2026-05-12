@@ -7,6 +7,22 @@ from datetime import datetime
 import plotly.express as px
 import plotly.graph_objects as go
 
+# ── SUPABASE (optional — enables cloud persistence) ───────────────────────────
+def _secret(k):
+    try:
+        return st.secrets.get(k) or ""
+    except Exception:
+        return ""
+
+_SB_URL = os.environ.get("SUPABASE_URL", "") or _secret("SUPABASE_URL")
+_SB_KEY = os.environ.get("SUPABASE_KEY", "") or _secret("SUPABASE_KEY")
+USE_SUPABASE = bool(_SB_URL and _SB_KEY)
+
+@st.cache_resource
+def _sb():
+    from supabase import create_client
+    return create_client(_SB_URL, _SB_KEY)
+
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 DATA_DIR = "data"
 TARGET_FILE = "targets.csv"
@@ -106,20 +122,99 @@ def save_json(path, data):
 def empty_person():
     return {"transactions": [], "nw_snapshots": [], "accounts": {}}
 
+# ── Supabase read/write helpers ───────────────────────────────────────────────
+def _sb_load_person(key):
+    sb = _sb()
+    data = empty_person()
+
+    rows = sb.table("transactions").select("*").eq("person", key).execute().data or []
+    data["transactions"] = [
+        {"Date": r["date"], "Description": r["description"],
+         "Amount": r["amount"], "Bank": r["bank"], "Category": r["category"]}
+        for r in rows
+    ]
+
+    rows = sb.table("nw_snapshots").select("*").eq("person", key).execute().data or []
+    data["nw_snapshots"] = [
+        {"Date": r["date"], "Net Worth": r["net_worth"], "Note": r.get("note", "")}
+        for r in rows
+    ]
+
+    rows = sb.table("accounts").select("*").eq("person", key).execute().data or []
+    data["accounts"] = {
+        r["name"]: {"type": r["type"], "balance": r["balance"], "updated": r.get("updated", "")}
+        for r in rows
+    }
+    return data
+
+def _sb_save_person(key, data):
+    sb = _sb()
+
+    sb.table("transactions").delete().eq("person", key).execute()
+    if data["transactions"]:
+        sb.table("transactions").insert([
+            {"person": key, "date": t["Date"], "description": t["Description"],
+             "amount": t["Amount"], "bank": t["Bank"], "category": t["Category"]}
+            for t in data["transactions"]
+        ]).execute()
+
+    sb.table("nw_snapshots").delete().eq("person", key).execute()
+    if data["nw_snapshots"]:
+        sb.table("nw_snapshots").insert([
+            {"person": key, "date": s["Date"], "net_worth": s["Net Worth"], "note": s.get("Note", "")}
+            for s in data["nw_snapshots"]
+        ]).execute()
+
+    sb.table("accounts").delete().eq("person", key).execute()
+    if data["accounts"]:
+        sb.table("accounts").insert([
+            {"person": key, "name": name, "type": v["type"],
+             "balance": v["balance"], "updated": v.get("updated", "")}
+            for name, v in data["accounts"].items()
+        ]).execute()
+
+    st.cache_data.clear()
+
+def _sb_load_mapping():
+    sb = _sb()
+    row = sb.table("settings").select("value").eq("key", "category_map").execute().data
+    if row:
+        stored = row[0]["value"]
+        merged = dict(DEFAULT_CATEGORY_MAP)
+        merged.update(stored)
+        return merged
+    return dict(DEFAULT_CATEGORY_MAP)
+
+def _sb_save_mapping(m):
+    sb = _sb()
+    sb.table("settings").upsert({"key": "category_map", "value": m}).execute()
+    st.cache_data.clear()
+
+# ── Public data API (dispatches to Supabase or local files) ───────────────────
 def load_person(key):
+    if USE_SUPABASE:
+        return _sb_load_person(key)
     return load_json(PEOPLE[key]["file"], empty_person())
 
 def save_person(key, data):
-    save_json(PEOPLE[key]["file"], data)
+    if USE_SUPABASE:
+        _sb_save_person(key, data)
+    else:
+        save_json(PEOPLE[key]["file"], data)
 
 def load_mapping():
+    if USE_SUPABASE:
+        return _sb_load_mapping()
     stored = load_json(MAPPING_FILE, {})
     merged = dict(DEFAULT_CATEGORY_MAP)
     merged.update(stored)
     return merged
 
 def save_mapping(m):
-    save_json(MAPPING_FILE, m)
+    if USE_SUPABASE:
+        _sb_save_mapping(m)
+    else:
+        save_json(MAPPING_FILE, m)
 
 def categorize(description, mapping):
     desc_upper = str(description).upper()

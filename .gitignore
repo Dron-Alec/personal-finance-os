@@ -1,0 +1,12 @@
+# Personal financial data — never commit
+data/
+data.json
+category_map.json
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.env

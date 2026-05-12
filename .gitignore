@@ -3,10 +3,13 @@ data/
 data.json
 category_map.json
 
+# Secrets — never commit
+.streamlit/secrets.toml
+.env
+
 # macOS
 .DS_Store
 
 # Python
 __pycache__/
 *.pyc
-.env

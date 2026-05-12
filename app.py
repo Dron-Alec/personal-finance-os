@@ -474,6 +474,16 @@ def render_spending(person_key):
             st.rerun()
 
 
+STANDARD_BACKFILL_ACCOUNTS = [
+    ("Citi Checking",      "Checking"),
+    ("Axos Savings",       "Savings"),
+    ("Coinbase",           "Crypto"),
+    ("Fidelity 401k",      "401k"),
+    ("Roth IRA",           "Roth IRA"),
+    ("Taxable Brokerage",  "Brokerage / Stocks"),
+]
+
+
 def render_accounts(person_key):
     data     = load_person(person_key)
     name     = PEOPLE[person_key]["name"]
@@ -481,7 +491,95 @@ def render_accounts(person_key):
 
     st.subheader(f"{name}'s Accounts & Holdings")
 
-    with st.expander("➕ Add / Update Account", expanded=not accounts):
+    # ── Bulk / Backfill Entry ─────────────────────────────────────────────────
+    with st.expander("📅 Manual Balance Entry (backfill / bulk update)", expanded=not accounts):
+        st.caption(
+            "Enter balances for all accounts on a specific date — useful for backfilling "
+            "missed months. A net worth snapshot is saved automatically from the totals."
+        )
+
+        entry_date = st.date_input(
+            "As of Date", value=datetime.today(), key=f"bulk_date_{person_key}"
+        )
+
+        # Collect inputs for every existing named account
+        existing_vals: dict[str, float] = {}
+        new_vals: dict[str, tuple[str, float]] = {}  # name -> (type, balance)
+
+        st.markdown("**Your accounts**")
+        if accounts:
+            cols = st.columns(2)
+            for idx, (acct_name, acct_info) in enumerate(accounts.items()):
+                col = cols[idx % 2]
+                existing_vals[acct_name] = col.number_input(
+                    f"{acct_name}",
+                    value=float(acct_info.get("balance", 0.0)),
+                    step=100.0,
+                    format="%.2f",
+                    key=f"bulk_ex_{person_key}_{acct_name}",
+                )
+        else:
+            st.info("No accounts set up yet — fill in the standard types below.")
+
+        # Show standard account types that aren't already named accounts
+        missing_standards = [
+            (n, t) for n, t in STANDARD_BACKFILL_ACCOUNTS if n not in accounts
+        ]
+        if missing_standards:
+            st.markdown("**Standard account types** *(leave at 0 to skip)*")
+            cols2 = st.columns(2)
+            for idx, (std_name, std_type) in enumerate(missing_standards):
+                col = cols2[idx % 2]
+                val = col.number_input(
+                    f"{std_name} ({std_type})",
+                    value=0.0,
+                    step=100.0,
+                    format="%.2f",
+                    key=f"bulk_std_{person_key}_{std_name}",
+                )
+                if val != 0.0:
+                    new_vals[std_name] = (std_type, val)
+
+        total_bulk = sum(existing_vals.values()) + sum(v for _, v in new_vals.values())
+        st.metric("Total (this entry)", f"${total_bulk:,.2f}")
+
+        update_acct_records = st.checkbox(
+            "Also update each account's current balance record",
+            value=True,
+            key=f"bulk_upd_{person_key}",
+        )
+
+        if st.button("💾 Save Entry", key=f"bulk_save_{person_key}"):
+            date_str = entry_date.strftime("%Y-%m-%d")
+
+            # Update existing account balances
+            if update_acct_records:
+                for acct_name, bal in existing_vals.items():
+                    accounts[acct_name]["balance"] = bal
+                    accounts[acct_name]["updated"] = date_str
+                # Create new accounts for non-zero standard entries
+                for acct_name, (acct_type, bal) in new_vals.items():
+                    accounts[acct_name] = {
+                        "type": acct_type,
+                        "balance": bal,
+                        "updated": date_str,
+                    }
+                data["accounts"] = accounts
+
+            # Save net worth snapshot
+            data.setdefault("nw_snapshots", []).append({
+                "Date": date_str,
+                "Net Worth": total_bulk,
+                "Note": "Manual entry",
+            })
+            save_person(person_key, data)
+            st.success(
+                f"Saved! Net worth snapshot of **${total_bulk:,.2f}** recorded for {date_str}."
+            )
+            st.rerun()
+
+    # ── Single Account Add / Update ───────────────────────────────────────────
+    with st.expander("➕ Add / Update Single Account", expanded=False):
         c1, c2, c3 = st.columns(3)
         acct_name = c1.text_input("Account Name", placeholder="e.g. Fidelity 401k", key=f"an_{person_key}")
         acct_type = c2.selectbox("Type", ACCOUNT_TYPES, key=f"at_{person_key}")

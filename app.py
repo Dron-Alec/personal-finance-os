@@ -694,14 +694,12 @@ def render_accounts(person_key):
             acct_date = c4.date_input("As of Date", value=datetime.today())
         else:
             existing  = accounts[sel_acct]
-            c1, c2, c3 = st.columns(3)
             acct_name = sel_acct
-            acct_type = c1.selectbox("Type", ACCOUNT_TYPES,
-                                     index=ACCOUNT_TYPES.index(existing["type"])
-                                     if existing["type"] in ACCOUNT_TYPES else 0)
-            acct_bal  = c2.number_input("Balance ($)",
+            acct_type = existing["type"]
+            c1, c2 = st.columns(2)
+            acct_bal  = c1.number_input("Balance ($)",
                                         value=float(existing.get("balance", 0.0)), step=100.0)
-            acct_date = c3.date_input("As of Date", value=datetime.today())
+            acct_date = c2.date_input("As of Date", value=datetime.today())
 
         submitted = st.form_submit_button("Save Account", type="primary")
         if submitted and acct_name:

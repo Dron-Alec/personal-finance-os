@@ -170,14 +170,18 @@ def _sb_save_person(key, data):
             for s in data["nw_snapshots"]
         ]).execute()
 
-    sb.table("accounts").delete().eq("person", key).execute()
     if data["accounts"]:
-        sb.table("accounts").insert([
+        sb.table("accounts").upsert([
             {"person": key, "name": name, "type": v["type"],
              "balance": v["balance"], "updated": v.get("updated", ""),
              "history": v.get("history", [])}
             for name, v in data["accounts"].items()
-        ]).execute()
+        ], on_conflict="person,name").execute()
+    current_names = list(data["accounts"].keys())
+    if current_names:
+        sb.table("accounts").delete().eq("person", key).not_.in_("name", current_names).execute()
+    else:
+        sb.table("accounts").delete().eq("person", key).execute()
 
     st.cache_data.clear()
 

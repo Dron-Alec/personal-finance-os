@@ -142,7 +142,12 @@ def _sb_load_person(key):
 
     rows = sb.table("accounts").select("*").eq("person", key).execute().data or []
     data["accounts"] = {
-        r["name"]: {"type": r["type"], "balance": r["balance"], "updated": r.get("updated", "")}
+        r["name"]: {
+            "type": r["type"],
+            "balance": r["balance"],
+            "updated": r.get("updated", ""),
+            "history": r.get("history") or [],
+        }
         for r in rows
     }
     return data
@@ -169,7 +174,8 @@ def _sb_save_person(key, data):
     if data["accounts"]:
         sb.table("accounts").insert([
             {"person": key, "name": name, "type": v["type"],
-             "balance": v["balance"], "updated": v.get("updated", "")}
+             "balance": v["balance"], "updated": v.get("updated", ""),
+             "history": v.get("history", [])}
             for name, v in data["accounts"].items()
         ]).execute()
 
@@ -381,19 +387,105 @@ def nw_df(person_data):
 # TAB RENDERERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def render_import(person_key):
-    data = load_person(person_key)
-    mapping = load_mapping()
+def _last_day_of_prev_month():
+    today = datetime.today()
+    first_of_this = today.replace(day=1)
+    return (first_of_this - pd.Timedelta(days=1)).date()
 
-    st.subheader("Upload Bank / Credit Card Statements")
-    c1, c2 = st.columns([1, 2])
-    bank_type = c1.selectbox("Statement Format", BANK_FORMATS, key=f"fmt_{person_key}")
-    files = c2.file_uploader(
-        "CSV files (multiple OK)", type="csv",
-        accept_multiple_files=True, key=f"up_{person_key}"
+
+def render_data_entry(person_key):
+    data     = load_person(person_key)
+    name     = PEOPLE[person_key]["name"]
+    accounts = data.get("accounts", {})
+    mapping  = load_mapping()
+
+    # ── Section 1: Month-End Balances ────────────────────────────────────────
+    st.subheader("Month-End Balances")
+    st.caption(
+        "Enter account balances as of month-end. Saving creates a net worth snapshot "
+        "that updates the net worth graphs."
     )
 
-    if files and st.button("Import Transactions", key=f"imp_{person_key}"):
+    entry_date = st.date_input(
+        "Balance Date (month-end)",
+        value=_last_day_of_prev_month(),
+        key=f"de_date_{person_key}",
+    )
+
+    existing_vals: dict[str, float] = {}
+    new_vals: dict[str, tuple[str, float]] = {}
+
+    if accounts:
+        st.markdown("**Your accounts**")
+        cols = st.columns(2)
+        for idx, (acct_name, acct_info) in enumerate(accounts.items()):
+            existing_vals[acct_name] = cols[idx % 2].number_input(
+                acct_name,
+                value=float(acct_info.get("balance", 0.0)),
+                step=100.0,
+                format="%.2f",
+                key=f"de_ex_{person_key}_{acct_name}",
+            )
+    else:
+        st.info("No accounts set up yet — add them in the Accounts tab first, or use the standard list below.")
+
+    missing_standards = [(n, t) for n, t in STANDARD_BACKFILL_ACCOUNTS if n not in accounts]
+    if missing_standards:
+        st.markdown("**Standard accounts** *(leave at 0 to skip)*")
+        cols2 = st.columns(2)
+        for idx, (std_name, std_type) in enumerate(missing_standards):
+            val = cols2[idx % 2].number_input(
+                f"{std_name}  ({std_type})",
+                value=0.0, step=100.0, format="%.2f",
+                key=f"de_std_{person_key}_{std_name}",
+            )
+            if val != 0.0:
+                new_vals[std_name] = (std_type, val)
+
+    total_entry = sum(existing_vals.values()) + sum(v for _, v in new_vals.values())
+    st.metric("Total Net Worth (this entry)", f"${total_entry:,.2f}")
+
+    if st.button("Save Balances & Snapshot", key=f"de_save_{person_key}", type="primary"):
+        date_str = entry_date.strftime("%Y-%m-%d")
+        for acct_name, bal in existing_vals.items():
+            acct = accounts[acct_name]
+            history = acct.get("history", [])
+            history.append({"date": date_str, "balance": bal})
+            acct["balance"] = bal
+            acct["updated"] = date_str
+            acct["history"] = history
+        for acct_name, (acct_type, bal) in new_vals.items():
+            accounts[acct_name] = {
+                "type": acct_type, "balance": bal, "updated": date_str,
+                "history": [{"date": date_str, "balance": bal}],
+            }
+        data["accounts"] = accounts
+        data.setdefault("nw_snapshots", []).append({
+            "Date": date_str,
+            "Net Worth": total_entry,
+            "Note": "Monthly balance entry",
+        })
+        save_person(person_key, data)
+        st.success(f"Saved! Net worth snapshot of **${total_entry:,.2f}** recorded for {date_str}.")
+        st.rerun()
+
+    st.divider()
+
+    # ── Section 2: Upload Statements ─────────────────────────────────────────
+    st.subheader("Upload Statements")
+    st.caption(
+        "Upload bank or credit card CSVs as they come in. "
+        "Transactions are categorized automatically and populate the Spending analysis."
+    )
+
+    c1, c2 = st.columns([1, 2])
+    bank_type = c1.selectbox("Statement Format", BANK_FORMATS, key=f"de_fmt_{person_key}")
+    files = c2.file_uploader(
+        "CSV files (multiple OK)", type="csv",
+        accept_multiple_files=True, key=f"de_up_{person_key}",
+    )
+
+    if files and st.button("Import Transactions", key=f"de_imp_{person_key}"):
         new_txs = []
         for f in files:
             parsed = process_csv(f, bank_type)
@@ -405,8 +497,7 @@ def render_import(person_key):
         added = [t for t in new_txs if (t["Date"], t["Description"], t["Amount"]) not in existing_keys]
         data["transactions"].extend(added)
         save_person(person_key, data)
-
-        st.success(f"Imported **{len(added)}** transactions ({len(new_txs)-len(added)} duplicates skipped).")
+        st.success(f"Imported **{len(added)}** transactions ({len(new_txs) - len(added)} duplicates skipped).")
         st.rerun()
 
     txs = data.get("transactions", [])
@@ -414,18 +505,16 @@ def render_import(person_key):
         st.caption(f"{len(txs)} transactions on file")
         df_p = pd.DataFrame(txs)
         df_p["Date"] = pd.to_datetime(df_p["Date"], errors="coerce")
-
-        # Download button
         csv_bytes = df_p.sort_values("Date", ascending=False).to_csv(index=False).encode()
         st.download_button(
-            "⬇️ Download all transactions as CSV",
+            "Download all transactions as CSV",
             data=csv_bytes,
             file_name=f"{person_key}_transactions.csv",
             mime="text/csv",
         )
-        st.dataframe(df_p.sort_values("Date", ascending=False), use_container_width=True, height=340)
+        st.dataframe(df_p.sort_values("Date", ascending=False), use_container_width=True, height=300)
     else:
-        st.info("No transactions yet. Upload a CSV above.")
+        st.info("No transactions yet — upload a CSV above.")
 
 
 def render_networth(person_key):
@@ -588,108 +677,50 @@ def render_accounts(person_key):
 
     st.subheader(f"{name}'s Accounts & Holdings")
 
-    # ── Bulk / Backfill Entry ─────────────────────────────────────────────────
-    with st.expander("📅 Manual Balance Entry (backfill / bulk update)", expanded=not accounts):
-        st.caption(
-            "Enter balances for all accounts on a specific date — useful for backfilling "
-            "missed months. A net worth snapshot is saved automatically from the totals."
-        )
+    # ── Add / Update Account ──────────────────────────────────────────────────
+    ADD_NEW = "＋ Add new account"
+    acct_options = list(accounts.keys()) + [ADD_NEW]
+    sel_acct = st.selectbox("Account", acct_options, key=f"acct_sel_{person_key}")
 
-        entry_date = st.date_input(
-            "As of Date", value=datetime.today(), key=f"bulk_date_{person_key}"
-        )
-
-        # Collect inputs for every existing named account
-        existing_vals: dict[str, float] = {}
-        new_vals: dict[str, tuple[str, float]] = {}  # name -> (type, balance)
-
-        st.markdown("**Your accounts**")
-        if accounts:
-            cols = st.columns(2)
-            for idx, (acct_name, acct_info) in enumerate(accounts.items()):
-                col = cols[idx % 2]
-                existing_vals[acct_name] = col.number_input(
-                    f"{acct_name}",
-                    value=float(acct_info.get("balance", 0.0)),
-                    step=100.0,
-                    format="%.2f",
-                    key=f"bulk_ex_{person_key}_{acct_name}",
-                )
+    with st.form(key=f"acct_form_{person_key}"):
+        if sel_acct == ADD_NEW:
+            c1, c2, c3, c4 = st.columns(4)
+            acct_name = c1.text_input("Account Name", placeholder="e.g. Fidelity 401k")
+            acct_type = c2.selectbox("Type", ACCOUNT_TYPES)
+            acct_bal  = c3.number_input("Balance ($)", value=0.0, step=100.0)
+            acct_date = c4.date_input("As of Date", value=datetime.today())
         else:
-            st.info("No accounts set up yet — fill in the standard types below.")
+            existing  = accounts[sel_acct]
+            c1, c2, c3 = st.columns(3)
+            acct_name = sel_acct
+            acct_type = c1.selectbox("Type", ACCOUNT_TYPES,
+                                     index=ACCOUNT_TYPES.index(existing["type"])
+                                     if existing["type"] in ACCOUNT_TYPES else 0)
+            acct_bal  = c2.number_input("Balance ($)",
+                                        value=float(existing.get("balance", 0.0)), step=100.0)
+            acct_date = c3.date_input("As of Date", value=datetime.today())
 
-        # Show standard account types that aren't already named accounts
-        missing_standards = [
-            (n, t) for n, t in STANDARD_BACKFILL_ACCOUNTS if n not in accounts
-        ]
-        if missing_standards:
-            st.markdown("**Standard account types** *(leave at 0 to skip)*")
-            cols2 = st.columns(2)
-            for idx, (std_name, std_type) in enumerate(missing_standards):
-                col = cols2[idx % 2]
-                val = col.number_input(
-                    f"{std_name} ({std_type})",
-                    value=0.0,
-                    step=100.0,
-                    format="%.2f",
-                    key=f"bulk_std_{person_key}_{std_name}",
-                )
-                if val != 0.0:
-                    new_vals[std_name] = (std_type, val)
-
-        total_bulk = sum(existing_vals.values()) + sum(v for _, v in new_vals.values())
-        st.metric("Total (this entry)", f"${total_bulk:,.2f}")
-
-        update_acct_records = st.checkbox(
-            "Also update each account's current balance record",
-            value=True,
-            key=f"bulk_upd_{person_key}",
-        )
-
-        if st.button("💾 Save Entry", key=f"bulk_save_{person_key}"):
-            date_str = entry_date.strftime("%Y-%m-%d")
-
-            # Update existing account balances
-            if update_acct_records:
-                for acct_name, bal in existing_vals.items():
-                    accounts[acct_name]["balance"] = bal
-                    accounts[acct_name]["updated"] = date_str
-                # Create new accounts for non-zero standard entries
-                for acct_name, (acct_type, bal) in new_vals.items():
-                    accounts[acct_name] = {
-                        "type": acct_type,
-                        "balance": bal,
-                        "updated": date_str,
-                    }
-                data["accounts"] = accounts
-
-            # Save net worth snapshot
-            data.setdefault("nw_snapshots", []).append({
-                "Date": date_str,
-                "Net Worth": total_bulk,
-                "Note": "Manual entry",
-            })
-            save_person(person_key, data)
-            st.success(
-                f"Saved! Net worth snapshot of **${total_bulk:,.2f}** recorded for {date_str}."
-            )
-            st.rerun()
-
-    # ── Single Account Add / Update ───────────────────────────────────────────
-    with st.expander("➕ Add / Update Single Account", expanded=False):
-        c1, c2, c3 = st.columns(3)
-        acct_name = c1.text_input("Account Name", placeholder="e.g. Fidelity 401k", key=f"an_{person_key}")
-        acct_type = c2.selectbox("Type", ACCOUNT_TYPES, key=f"at_{person_key}")
-        acct_bal  = c3.number_input("Balance ($)", value=0.0, step=100.0, key=f"ab_{person_key}")
-        if st.button("Save Account", key=f"as_{person_key}") and acct_name:
+        submitted = st.form_submit_button("Save Account", type="primary")
+        if submitted and acct_name:
+            date_str = acct_date.strftime("%Y-%m-%d")
+            existing_acct = accounts.get(acct_name, {})
+            history = existing_acct.get("history", [])
+            history.append({"date": date_str, "balance": acct_bal})
             accounts[acct_name] = {
                 "type": acct_type,
                 "balance": acct_bal,
-                "updated": datetime.today().strftime("%Y-%m-%d"),
+                "updated": date_str,
+                "history": history,
             }
             data["accounts"] = accounts
+            total_nw = sum(v.get("balance", 0.0) for v in accounts.values())
+            data.setdefault("nw_snapshots", []).append({
+                "Date": date_str,
+                "Net Worth": total_nw,
+                "Note": f"Account update: {acct_name}",
+            })
             save_person(person_key, data)
-            st.success(f"Saved '{acct_name}'")
+            st.success(f"Saved '{acct_name}' — net worth snapshot of **${total_nw:,.2f}** recorded.")
             st.rerun()
 
     if not accounts:
@@ -717,6 +748,32 @@ def render_accounts(person_key):
     fig_bar = px.bar(type_totals, x="Type", y="Balance ($)", title="By Account Type",
                      color="Type", color_discrete_sequence=px.colors.qualitative.Pastel)
     st.plotly_chart(fig_bar, use_container_width=True)
+
+    # ── Balance History ───────────────────────────────────────────────────────
+    st.divider()
+    st.subheader("Balance History")
+    hist_sel = st.selectbox(
+        "Select account", list(accounts.keys()), key=f"hist_sel_{person_key}"
+    )
+    hist = accounts[hist_sel].get("history", [])
+    if not hist:
+        st.info("No history yet for this account — entries will appear here after the next save.")
+    else:
+        df_hist = pd.DataFrame(hist)
+        df_hist["date"] = pd.to_datetime(df_hist["date"])
+        df_hist = df_hist.sort_values("date")
+        fig_hist = px.line(
+            df_hist, x="date", y="balance", markers=True,
+            title=f"{hist_sel} Balance Over Time",
+            labels={"date": "Date", "balance": "Balance ($)"},
+        )
+        fig_hist.update_layout(height=320, margin=dict(t=40))
+        st.plotly_chart(fig_hist, use_container_width=True)
+        st.dataframe(
+            df_hist.rename(columns={"date": "Date", "balance": "Balance ($)"})
+                   .sort_values("Date", ascending=False),
+            use_container_width=True,
+        )
 
     del_acct = st.selectbox("Remove Account", ["—"] + list(accounts.keys()), key=f"da_{person_key}")
     if del_acct != "—" and st.button("Remove", key=f"dr_{person_key}"):
@@ -973,8 +1030,8 @@ top_tabs = st.tabs(["👤 Alec", "👤 Haley", "🏦 Aggregated"])
 
 for tab, key in zip(top_tabs[:2], ("alec", "haley")):
     with tab:
-        sub = st.tabs(["📥 Import", "📈 Net Worth", "💸 Spending", "🏦 Accounts", "⚙️ Settings"])
-        with sub[0]: render_import(key)
+        sub = st.tabs(["📋 Data Entry", "📈 Net Worth", "💸 Spending", "🏦 Accounts", "⚙️ Settings"])
+        with sub[0]: render_data_entry(key)
         with sub[1]: render_networth(key)
         with sub[2]: render_spending(key)
         with sub[3]: render_accounts(key)

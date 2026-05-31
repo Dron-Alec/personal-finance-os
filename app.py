@@ -399,7 +399,6 @@ def _last_day_of_prev_month():
 
 def render_data_entry(person_key):
     data     = load_person(person_key)
-    name     = PEOPLE[person_key]["name"]
     accounts = data.get("accounts", {})
     mapping  = load_mapping()
 

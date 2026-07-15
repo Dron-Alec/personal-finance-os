@@ -105,11 +105,16 @@ DEFAULT_CATEGORY_MAP = {
         "PAYROLL", "DIRECT DEPOSIT", "CROWE LLP", "JEWISHFEDERATION", "MESORAH",
     ],
     "Transfers": [
-        "VENMO", "ZELLE", "PAYPAL", "CASHAPP", "TRANSFER FROM",
-        "HALEY GRINER", "PAYMENT - THANK YOU", "PAYMENT THANK YOU",
-        "ONLINE PAYMENT", "BILL PAYMENT",
+        "VENMO", "ZELLE", "PAYPAL", "CASHAPP", "HALEY GRINER",
+    ],
+    "Internal Transfer": [
+        "TRANSFER FROM", "TRANSFER TO",
+        "ONLINE PAYMENT", "BILL PAYMENT", "PAYMENT - THANK YOU", "PAYMENT THANK YOU",
+        "AXOS BANK",
     ],
 }
+
+SPENDING_EXCLUDE_CATS = {"Internal Transfer", "Income"}
 
 # ── DATA HELPERS ──────────────────────────────────────────────────────────────
 def load_json(path, default):
@@ -618,7 +623,8 @@ def render_spending(person_key):
     if sel_cat  != "All": df = df[df["Category"] == sel_cat]
     if sel_bank != "All": df = df[df["Bank"] == sel_bank]
 
-    expenses = df[df["Amount"] < 0].copy()
+    spending_df = df[~df["Category"].isin(SPENDING_EXCLUDE_CATS)] if sel_cat == "All" else df
+    expenses = spending_df[spending_df["Amount"] < 0].copy()
     expenses["Amount"] = expenses["Amount"].abs()
     income   = df[df["Amount"] > 0].copy()
 
@@ -960,7 +966,7 @@ def render_aggregated():
     if sel_month  != "All":  df_f = df_f[df_f["Date"].dt.to_period("M").astype(str) == sel_month]
     if sel_person != "Both": df_f = df_f[df_f["Person"] == sel_person]
 
-    expenses = df_f[df_f["Amount"] < 0].copy()
+    expenses = df_f[~df_f["Category"].isin(SPENDING_EXCLUDE_CATS) & (df_f["Amount"] < 0)].copy()
     expenses["Amount"] = expenses["Amount"].abs()
 
     alec_exp  = expenses[expenses["Person"] == "Alec"]["Amount"].sum()
